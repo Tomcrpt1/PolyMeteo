@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     max_slippage_bps: int = Field(default=50, alias="MAX_SLIPPAGE_BPS", ge=0)
 
     edge_threshold: float = Field(default=0.04, alias="EDGE_THRESHOLD", ge=0)
-    forecast_tmax_c: float = Field(default=14.5, alias="FORECAST_TMAX_C")
+    forecast_tmax_c: float | None = Field(default=None, alias="FORECAST_TMAX_C")
     prior_sigma_c: float = Field(default=2.0, alias="PRIOR_SIGMA_C", gt=0)
     temperature_rounding: Literal["round", "floor"] = Field(default="round", alias="TEMPERATURE_ROUNDING")
 
@@ -40,6 +40,13 @@ class Settings(BaseSettings):
 
     dry_run_log_orders: bool = Field(default=True, alias="DRY_RUN_LOG_ORDERS")
 
+
+    @field_validator("forecast_tmax_c", mode="before")
+    @classmethod
+    def _empty_forecast_to_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
     @model_validator(mode="after")
     def _validate_live_requirements(self) -> "Settings":
         if self.mode == "live":

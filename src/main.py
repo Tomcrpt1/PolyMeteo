@@ -14,15 +14,17 @@ from src.risk.limits import RiskLimits, RiskManager
 from src.strategy.decision import DecisionConfig, decide_orders
 from src.strategy.late_peak_risk import compute_late_peak_risk
 from src.strategy.nowcast import update_intraday_distribution
+from src.strategy.prior import resolve_forecast_tmax
 from src.strategy.priors import gaussian_prior
 from src.utils.time import now_tz, parse_date
-from src.weather.meteostat_client import MeteostatClient
+from src.weather.models import TemperatureSample
+from src.weather.open_meteo_client import OpenMeteoClient
 from src.weather.wunderground_client import WundergroundClient
 
 
 def run_cycle(
     settings: Settings,
-    weather_client: MeteostatClient,
+    weather_client: OpenMeteoClient,
     wu_client: WundergroundClient | None,
     pm_client: PolymarketClient,
     trader: Trader,
@@ -34,9 +36,8 @@ def run_cycle(
         return
 
     target_date = parse_date(settings.date_iso)
-    meteo = weather_client.fetch_conditions(target_date)
-    snapshot = meteo.snapshot
-    rounded_max = int(round(snapshot.max_temp_so_far_c)) if settings.temperature_rounding == "round" else int(snapshot.max_temp_so_far_c)
+    conditions = weather_client.fetch_hourly_conditions(target_date, settings.latitude, settings.longitude, settings.timezone)
+    rounded_max = int(round(conditions.max_temp_so_far_c)) if settings.temperature_rounding == "round" else int(conditions.max_temp_so_far_c)
 
     wu_value = None
     if wu_client:
@@ -44,21 +45,28 @@ def run_cycle(
         wu_value = wu.high_so_far_c
 
     now_local = now_tz(settings.timezone)
-    prior = gaussian_prior(settings.forecast_tmax_c, settings.prior_sigma_c)
+    resolved_forecast_tmax = resolve_forecast_tmax(
+        configured_forecast_tmax=settings.forecast_tmax_c,
+        target_date=target_date,
+        latitude=settings.latitude,
+        longitude=settings.longitude,
+        timezone=settings.timezone,
+    )
+    prior = gaussian_prior(resolved_forecast_tmax, settings.prior_sigma_c)
     late_risk, reasons = compute_late_peak_risk(
-        recent_samples=meteo.recent_samples,
-        max_temp_timestamp=snapshot.max_temp_timestamp,
+        recent_samples=[TemperatureSample(timestamp=r.timestamp, temperature_c=r.temperature_c) for r in conditions.records[-6:]],
+        max_temp_timestamp=conditions.max_temp_timestamp,
         now_local=now_local,
-        recent_wind_kph=meteo.recent_wind_kph,
-        recent_cloud_pct=meteo.recent_cloud_pct,
+        recent_wind_kph=[r.wind_kph for r in conditions.records[-6:]],
+        recent_cloud_pct=[r.cloud_cover_pct for r in conditions.records[-6:]],
     )
     posterior = update_intraday_distribution(prior, rounded_max, now_local, late_risk)
 
     log.info(
         "weather source=%s current=%.1fC max_so_far=%.1fC rounded=%d wu=%s late_risk=%.2f reasons=%s",
-        snapshot.source,
-        snapshot.current_temp_c,
-        snapshot.max_temp_so_far_c,
+        "open-meteo",
+        conditions.current_temp_c,
+        conditions.max_temp_so_far_c,
         rounded_max,
         wu_value,
         late_risk,
@@ -117,7 +125,7 @@ def main() -> None:
         settings.mode = args.mode
 
     log = setup_logger()
-    weather = MeteostatClient(settings.latitude, settings.longitude, settings.timezone)
+    weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
     pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key)
     trader = Trader(pm)

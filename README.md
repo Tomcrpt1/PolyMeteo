@@ -6,9 +6,10 @@ Production-oriented Python bot for trading the Polymarket market **"highest temp
 
 1. **Weather ingest**
    - Primary feed: Open-Meteo hourly endpoint around LFPG (CDG coordinates).
+   - Open-Meteo calls use a single-day `start_date`/`end_date` window; `forecast_days` is intentionally not used to avoid parameter conflicts.
    - Optional low-frequency Weather Underground parser for a high-so-far sanity check.
 2. **Modeling**
-   - Gaussian prior centered on `FORECAST_TMAX_C` and `PRIOR_SIGMA_C`.
+   - Gaussian prior centered on `FORECAST_TMAX_C` and `PRIOR_SIGMA_C` (or auto-fetched Open-Meteo daily max when `FORECAST_TMAX_C` is unset).
    - Intraday nowcast clamps probability mass below observed high so far.
    - Late-peak risk score (0..1) from trend, max recency, and diurnal context.
 3. **Execution**
@@ -44,11 +45,21 @@ All runtime knobs are in `.env.example`, including:
 - `POLYMARKET_PRIVATE_KEY`, `POLYMARKET_API_KEY`
 - `MARKET_ID` or `MARKET_URL`
 - `MAX_TOTAL_EXPOSURE_USD`, `MAX_ORDER_USD`, `MAX_ORDERS_PER_HOUR`
-- `EDGE_THRESHOLD`, `FORECAST_TMAX_C`, `PRIOR_SIGMA_C`
+- `EDGE_THRESHOLD`, optional `FORECAST_TMAX_C`, `PRIOR_SIGMA_C`
 - `WEATHER_POLL_SECONDS`, `MARKET_POLL_SECONDS`, `WU_POLL_SECONDS`
 - `TIMEZONE=Europe/Paris`
 
+
+## Open-Meteo request strategy
+
+- Hourly monitoring: `hourly=temperature_2m,wind_speed_10m,cloud_cover` with `start_date=end_date=TARGET_DATE`.
+- Daily prior fallback: `daily=temperature_2m_max` with `start_date=end_date=TARGET_DATE`.
+- The bot intentionally does **not** send `forecast_days` in these requests.
+
 ## Temperature rounding policy
+
+
+If `FORECAST_TMAX_C` is empty or omitted, the bot automatically requests Open-Meteo daily `temperature_2m_max` for `TARGET_DATE` at LFPG coordinates and uses that as the prior center.
 
 Resolution is whole °C. Default policy is `round` (`TEMPERATURE_ROUNDING=round`) with configurable `floor` option. Keep this consistent with your interpretation of source data.
 
