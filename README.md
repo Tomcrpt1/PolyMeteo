@@ -15,7 +15,8 @@ Production-oriented Python bot for trading the Polymarket market **"highest temp
 3. **Execution**
    - Pull market token mapping + orderbooks from Polymarket endpoints.
    - Compare model probabilities vs market implied probabilities.
-   - Buy 1–3 adjacent buckets when edge exceeds threshold and risk limits allow.
+   - Default `lock19` strategy waits until local 19:00, then buys exactly one bucket mapped from the locked max, and optionally adds a single upward hedge for late-peak risk.
+   - Optional `legacy` strategy keeps prior adjacent-bucket behavior.
 4. **Risk controls**
    - Max total exposure, max order USD, max orders/hour.
    - Kill switch (`KILL_SWITCH=1` or create `./KILL`).
@@ -46,8 +47,22 @@ All runtime knobs are in `.env.example`, including:
 - `MARKET_ID` or `MARKET_URL`
 - `MAX_TOTAL_EXPOSURE_USD`, `MAX_ORDER_USD`, `MAX_ORDERS_PER_HOUR`
 - `EDGE_THRESHOLD`, optional `FORECAST_TMAX_C`, `PRIOR_SIGMA_C`
+- `STRATEGY_MODE=lock19|legacy`
+- `LOCK_TIME_LOCAL`, `LOCK_WINDOW_START_LOCAL`
+- `HEDGE_ENABLED`, `HEDGE_RISK_THRESHOLD`, `HEDGE_TREND_HOURS`, `HEDGE_NEAR_PEAK_DELTA_C`
+- `HEDGE_MAX_TOTAL_USD` (defaults to 20% of `MAX_TOTAL_EXPOSURE_USD`)
+- `HEDGE_ONLY_IF_EDGE_POSITIVE`, `MAIN_ONLY_IF_EDGE_POSITIVE`
 - `WEATHER_POLL_SECONDS`, `MARKET_POLL_SECONDS`, `WU_POLL_SECONDS`
 - `TIMEZONE=Europe/Paris`
+
+## LOCK@19H + HEDGE strategy
+
+- Before local lock time (`LOCK_TIME_LOCAL`, default `19:00` Europe/Paris), the bot monitors only and does not place the main bet.
+- At/after lock time, the bot computes `LOCKED_MAX` using hourly records on `TARGET_DATE` from `LOCK_WINDOW_START_LOCAL -> LOCK_TIME_LOCAL`.
+- `LOCKED_MAX` is converted to whole °C using `TEMPERATURE_ROUNDING` and mapped to one Polymarket bucket (`<=12`, `13..19`, `>=20`).
+- Main position is single-bucket only (no adjacent buckets) and can require positive edge via `MAIN_ONLY_IF_EDGE_POSITIVE=true`.
+- Hedge logic only buys the next higher bucket (`bucket+1`) when late-peak conditions trigger (risk score threshold and/or near-peak rising trend), with total cap `HEDGE_MAX_TOTAL_USD`.
+- This reflects market resolution on full-day maximum while protecting against rare late-evening new highs.
 
 
 ## Open-Meteo request strategy
