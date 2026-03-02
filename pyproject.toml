@@ -1,0 +1,32 @@
+[project]
+name = "polymeteo"
+version = "0.1.0"
+description = "Production-ready Polymarket weather trading bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+  "pydantic>=2.6.0",
+  "pydantic-settings>=2.2.1",
+  "python-dotenv>=1.0.1",
+  "tenacity>=8.2.3",
+  "rich>=13.7.0",
+  "pandas>=2.2.0",
+  "pytest>=8.0.0",
+  "py-clob-client>=0.20.0",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
