@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import time
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     polymarket_api_key: str | None = Field(default=None, alias="POLYMARKET_API_KEY")
     market_url: str | None = Field(default=None, alias="MARKET_URL")
     market_id: str | None = Field(default=None, alias="MARKET_ID")
+    market_url_template: str = Field(
+        default="https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}",
+        alias="MARKET_URL_TEMPLATE",
+    )
+    market_city_slug: str = Field(default="paris", alias="MARKET_CITY_SLUG")
 
     max_total_exposure_usd: float = Field(default=250.0, alias="MAX_TOTAL_EXPOSURE_USD", gt=0)
     max_order_usd: float = Field(default=25.0, alias="MAX_ORDER_USD", gt=0)
@@ -45,6 +50,7 @@ class Settings(BaseSettings):
     latitude: float = Field(default=49.0097, alias="LFPG_LATITUDE")
     longitude: float = Field(default=2.5479, alias="LFPG_LONGITUDE")
     date_iso: str = Field(default="2026-03-03", alias="TARGET_DATE")
+    auto_rollover_target_date: bool = Field(default=True, alias="AUTO_ROLLOVER_TARGET_DATE")
 
     kill_switch_env: int = Field(default=0, alias="KILL_SWITCH")
     kill_switch_path: str = Field(default="KILL", alias="KILL_SWITCH_PATH")
@@ -58,14 +64,13 @@ class Settings(BaseSettings):
         if value == "":
             return None
         return value
-    @model_validator(mode="after")
-    def _validate_live_requirements(self) -> "Settings":
-        if self.mode == "live":
-            if not self.polymarket_private_key:
-                raise ValueError("POLYMARKET_PRIVATE_KEY is required in live mode")
-            if not self.market_id and not self.market_url:
-                raise ValueError("MARKET_ID or MARKET_URL is required")
-        return self
+
+    @field_validator("market_url", mode="before")
+    @classmethod
+    def _empty_market_url_to_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
 
     @staticmethod
     def _parse_hhmm(value: str) -> time:
