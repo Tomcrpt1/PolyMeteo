@@ -258,6 +258,8 @@ def main() -> None:
     settings = Settings()
     if args.mode:
         settings.mode = args.mode
+    target_date = parse_date(settings.date_iso)
+    market_url = resolve_market_url(settings, target_date)
 
     if settings.mode == "live":
         raise RuntimeError(
