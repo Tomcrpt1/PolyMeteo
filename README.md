@@ -1,6 +1,6 @@
 # PolyMeteo Trading Bot
 
-Production-oriented Python bot for trading the Polymarket market **"highest temperature in Paris on March 3, 2026"** with strict risk controls and paper mode.
+Production-oriented Python bot for trading daily Polymarket weather markets (e.g. "highest temperature in Paris on {month}-{day}-{year}") with strict risk controls.
 
 ## How it works
 
@@ -35,8 +35,22 @@ cp .env.example .env
 ```bash
 python -m src.main --mode paper --once
 python -m src.main --mode paper
-python -m src.main --mode live
 ```
+
+> `MODE=live` is intentionally blocked for now with a descriptive error. Paper mode is supported; signed live CLOB execution is not yet integrated.
+
+## Day-by-day usage
+
+For normal daily operation, you usually only change:
+
+- `TARGET_DATE=YYYY-MM-DD`
+
+Keep these defaults unless you have a custom market naming scheme:
+
+- `MARKET_URL=` (leave empty)
+- `MARKET_URL_TEMPLATE=https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}`
+
+With those settings, the bot auto-builds the daily Polymarket event URL from `TARGET_DATE` (lowercase English month name and non-zero-padded day).
 
 ## Environment variables
 
@@ -44,7 +58,9 @@ All runtime knobs are in `.env.example`, including:
 
 - `MODE=paper|live`
 - `POLYMARKET_PRIVATE_KEY`, `POLYMARKET_API_KEY`
-- `MARKET_ID` or `MARKET_URL`
+- `MARKET_ID` or `MARKET_URL` (optional; leave empty to auto-build from `TARGET_DATE`)
+- `MARKET_URL_TEMPLATE` (default: `https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}`)
+- `MARKET_CITY_SLUG` (default: `paris`; useful when your template includes `{city_slug}`)
 - `MAX_TOTAL_EXPOSURE_USD`, `MAX_ORDER_USD`, `MAX_ORDERS_PER_HOUR`
 - `EDGE_THRESHOLD`, optional `FORECAST_TMAX_C`, `PRIOR_SIGMA_C`
 - `STRATEGY_MODE=lock19|legacy`
@@ -55,9 +71,18 @@ All runtime knobs are in `.env.example`, including:
 - `WEATHER_POLL_SECONDS`, `MARKET_POLL_SECONDS`, `WU_POLL_SECONDS`
 - `TIMEZONE=Europe/Paris`
 
+If `MARKET_URL` is empty and `MARKET_ID` is not set, the bot builds market URL from `TARGET_DATE` using `MARKET_URL_TEMPLATE`.
+
+Recommended lock19 one-bucket setup:
+
+- `LOCK_TIME_LOCAL=17:30`
+- `LOCK_WINDOW_START_LOCAL=13:00`
+- `MAIN_ONLY_IF_EDGE_POSITIVE=false` (always place the main lock-time bet)
+- `HEDGE_ENABLED=false` (pure one-bucket mode)
+
 ## LOCK@19H + HEDGE strategy
 
-- Before local lock time (`LOCK_TIME_LOCAL`, default `19:00` Europe/Paris), the bot monitors only and does not place the main bet.
+- Before local lock time (`LOCK_TIME_LOCAL`), the bot monitors only and does not place the main bet.
 - At/after lock time, the bot computes `LOCKED_MAX` using hourly records on `TARGET_DATE` from `LOCK_WINDOW_START_LOCAL -> LOCK_TIME_LOCAL`.
 - `LOCKED_MAX` is converted to whole °C using `TEMPERATURE_ROUNDING` and mapped to one Polymarket bucket (`<=12`, `13..19`, `>=20`).
 - Main position is single-bucket only (no adjacent buckets) and can require positive edge via `MAIN_ONLY_IF_EDGE_POSITIVE=true`.
@@ -81,7 +106,7 @@ Resolution is whole °C. Default policy is `round` (`TEMPERATURE_ROUNDING=round`
 ## Safety warnings
 
 - Start in paper mode and validate logs before any live mode change.
-- Live mode currently requires extending `PolymarketClient.place_limit_order` with signed CLOB order placement using your credentials.
+- Live mode is not yet implemented for execution; `MODE=live` intentionally raises a descriptive runtime error.
 - Weather Underground parser is heuristic and should be treated as non-authoritative during intraday updates.
 - Final market resolution follows Weather Underground historical daily page and exchange rules.
 
