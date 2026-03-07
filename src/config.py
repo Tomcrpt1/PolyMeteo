@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     polymarket_api_key: str | None = Field(default=None, alias="POLYMARKET_API_KEY")
     market_url: str | None = Field(default=None, alias="MARKET_URL")
     market_id: str | None = Field(default=None, alias="MARKET_ID")
+    market_url_template: str = Field(
+        default="https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}",
+        alias="MARKET_URL_TEMPLATE",
+    )
+    market_city_slug: str = Field(default="paris", alias="MARKET_CITY_SLUG")
 
     max_total_exposure_usd: float = Field(default=250.0, alias="MAX_TOTAL_EXPOSURE_USD", gt=0)
     max_order_usd: float = Field(default=25.0, alias="MAX_ORDER_USD", gt=0)
@@ -58,6 +63,14 @@ class Settings(BaseSettings):
         if value == "":
             return None
         return value
+
+    @field_validator("market_url", mode="before")
+    @classmethod
+    def _empty_market_url_to_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
+
     @model_validator(mode="after")
     def _validate_live_requirements(self) -> "Settings":
         if self.mode == "live":
