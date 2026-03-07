@@ -56,6 +56,33 @@ class RiskManager:
             return False, "max_orders_per_hour reached"
         return True, "ok"
 
+    def validate_batch(self, orders: list[LimitOrderRequest]) -> tuple[list[LimitOrderRequest], list[tuple[LimitOrderRequest, str]]]:
+        now_utc = self._now_utc()
+        self._purge_old_order_timestamps(now_utc)
+        current_exposure = self.get_current_exposure_usd()
+        reserved_exposure = 0.0
+        reserved_orders = 0
+
+        approved: list[LimitOrderRequest] = []
+        blocked: list[tuple[LimitOrderRequest, str]] = []
+
+        for order in orders:
+            if order.size_usd > self.limits.max_order_usd:
+                blocked.append((order, "order exceeds max_order_usd"))
+                continue
+            if current_exposure + reserved_exposure + order.size_usd > self.limits.max_total_exposure_usd:
+                blocked.append((order, "total exposure limit"))
+                continue
+            if len(self.state.order_timestamps) + reserved_orders >= self.limits.max_orders_per_hour:
+                blocked.append((order, "max_orders_per_hour reached"))
+                continue
+
+            approved.append(order)
+            reserved_exposure += order.size_usd
+            reserved_orders += 1
+
+        return approved, blocked
+
     def register_order(self, order: LimitOrderRequest) -> None:
         _ = order
         now_utc = self._now_utc()

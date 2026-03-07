@@ -4,7 +4,7 @@ import argparse
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from src.config import Settings
 from src.logger import setup_logger
@@ -53,8 +53,16 @@ def sync_lock19_exposure_from_execution(runtime: RuntimeState, trader: Trader) -
     runtime.lock19.hedge_exposure_usd = trader.execution.lock19_hedge_exposure_usd
 
 
-def fetch_weather_snapshot(settings: Settings, weather_client: OpenMeteoClient, wu_client: WundergroundClient | None) -> tuple[WeatherConditions, int | None]:
-    target_date = parse_date(settings.date_iso)
+def resolve_target_date(settings: Settings) -> date:
+    return parse_date(settings.date_iso)
+
+
+def fetch_weather_snapshot(
+    settings: Settings,
+    target_date: date,
+    weather_client: OpenMeteoClient,
+    wu_client: WundergroundClient | None,
+) -> tuple[WeatherConditions, int | None]:
     conditions = weather_client.fetch_hourly_conditions(target_date, settings.latitude, settings.longitude, settings.timezone)
     wu_value = None
     if wu_client:
@@ -72,6 +80,7 @@ def fetch_market_snapshot(pm_client: PolymarketClient) -> MarketSnapshot:
 
 def evaluate_and_trade(
     settings: Settings,
+    target_date: date,
     pm_client: PolymarketClient,
     trader: Trader,
     risk: RiskManager,
@@ -85,7 +94,6 @@ def evaluate_and_trade(
         log.warning("Kill switch active; monitoring only")
         return
 
-    target_date = parse_date(settings.date_iso)
     rounded_max = int(round(conditions.max_temp_so_far_c)) if settings.temperature_rounding == "round" else int(conditions.max_temp_so_far_c)
 
     now_local = now_tz(settings.timezone)
@@ -190,20 +198,16 @@ def evaluate_and_trade(
             log.info("no trade: %s", plan.reason or "no lock19 orders")
             return
 
-    approved = []
-    for order in candidate_orders:
-        ok, reason = risk.validate_order(order)
-        if ok:
-            approved.append(order)
-        else:
-            log.warning("risk blocked order %s: %s", order.outcome, reason)
+    approved, blocked = risk.validate_batch(candidate_orders)
+    for blocked_order, reason in blocked:
+        log.warning("risk blocked order %s: %s", blocked_order.outcome, reason)
 
     if not approved:
         log.info("all orders blocked by risk")
         return
 
     lock19_main_bucket = runtime.lock19.main_bucket if settings.strategy_mode == "lock19" else None
-    ids = trader.requote(approved, lock19_main_bucket=lock19_main_bucket)
+    ids = trader.requote(approved, lock19_main_bucket=lock19_main_bucket, strategy_mode=settings.strategy_mode)
     for order in approved:
         risk.register_order(order)
     log.info("placed %d orders ids=%s", len(ids), ids)
@@ -211,6 +215,7 @@ def evaluate_and_trade(
 
 def run_scheduled_cycle(
     settings: Settings,
+    target_date: date,
     weather_client: OpenMeteoClient,
     wu_client: WundergroundClient | None,
     pm_client: PolymarketClient,
@@ -222,7 +227,7 @@ def run_scheduled_cycle(
     now_local: datetime,
 ) -> None:
     if polling.next_weather_poll_at is None or now_local >= polling.next_weather_poll_at or polling.weather is None:
-        polling.weather, polling.wu_value = fetch_weather_snapshot(settings, weather_client, wu_client)
+        polling.weather, polling.wu_value = fetch_weather_snapshot(settings, target_date, weather_client, wu_client)
         polling.next_weather_poll_at = now_local + timedelta(seconds=settings.weather_poll_seconds)
     if polling.next_market_poll_at is None or now_local >= polling.next_market_poll_at or polling.market is None:
         polling.market = fetch_market_snapshot(pm_client)
@@ -233,6 +238,7 @@ def run_scheduled_cycle(
 
     evaluate_and_trade(
         settings=settings,
+        target_date=target_date,
         pm_client=pm_client,
         trader=trader,
         risk=risk,
@@ -279,6 +285,15 @@ def main() -> None:
     target_date = parse_date(settings.date_iso)
     market_url = resolve_market_url(settings, target_date)
 
+    if settings.mode == "live":
+        raise RuntimeError(
+            "MODE=live is not fully implemented yet. "
+            "Order placement remains paper-only until signed CLOB execution is integrated."
+        )
+
+    target_date = resolve_target_date(settings)
+    market_url = resolve_market_url(settings, target_date)
+
     log = setup_logger()
     weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
@@ -290,18 +305,18 @@ def main() -> None:
             max_order_usd=settings.max_order_usd,
             max_orders_per_hour=settings.max_orders_per_hour,
         ),
-        exposure_provider=lambda: trader.execution.lock19_main_exposure_usd + trader.execution.lock19_hedge_exposure_usd,
+        exposure_provider=lambda: trader.execution.exposure_for_mode(settings.strategy_mode),
     )
     runtime = RuntimeState()
     polling = PollingState()
 
     if args.once:
-        run_scheduled_cycle(settings, weather, wu, pm, trader, risk, log, runtime, polling, now_tz(settings.timezone))
+        run_scheduled_cycle(settings, target_date, weather, wu, pm, trader, risk, log, runtime, polling, now_tz(settings.timezone))
         return
 
     while True:
         now_local = now_tz(settings.timezone)
-        run_scheduled_cycle(settings, weather, wu, pm, trader, risk, log, runtime, polling, now_local)
+        run_scheduled_cycle(settings, target_date, weather, wu, pm, trader, risk, log, runtime, polling, now_local)
         next_due = min(polling.next_weather_poll_at, polling.next_market_poll_at)
         sleep_seconds = max(0.5, (next_due - now_local).total_seconds())
         time.sleep(sleep_seconds)

@@ -76,6 +76,7 @@ def test_polling_separates_weather_and_market_refresh(monkeypatch):
     ]:
         run_scheduled_cycle(
             settings=settings,
+            target_date=date(2026, 3, 5),
             weather_client=weather,
             wu_client=None,
             pm_client=pm,
@@ -101,6 +102,7 @@ def test_cached_weather_reused_until_weather_poll_due(monkeypatch):
 
     run_scheduled_cycle(
         settings=settings,
+        target_date=date(2026, 3, 5),
         weather_client=weather,
         wu_client=None,
         pm_client=pm,
@@ -115,6 +117,7 @@ def test_cached_weather_reused_until_weather_poll_due(monkeypatch):
 
     run_scheduled_cycle(
         settings=settings,
+        target_date=date(2026, 3, 5),
         weather_client=weather,
         wu_client=None,
         pm_client=pm,
@@ -201,6 +204,21 @@ def test_risk_reads_exposure_from_paper_execution_state():
 
     trader.requote([order], lock19_main_bucket="19")
     ok, reason = risk.validate_order(LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=25))
+
+    assert not ok
+    assert "total exposure" in reason
+
+
+def test_legacy_mode_exposure_provider_reads_legacy_execution_state():
+    trader = Trader(FakeClientForTrader())
+    risk = RiskManager(
+        RiskLimits(max_total_exposure_usd=30, max_order_usd=30, max_orders_per_hour=10),
+        exposure_provider=lambda: trader.execution.exposure_for_mode("legacy"),
+    )
+    order = LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=20)
+
+    trader.requote([order], strategy_mode="legacy")
+    ok, reason = risk.validate_order(LimitOrderRequest(token_id="t", outcome="18", price=0.5, size_usd=15))
 
     assert not ok
     assert "total exposure" in reason

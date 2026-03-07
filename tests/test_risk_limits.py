@@ -76,3 +76,45 @@ def test_risk_exposure_live_placeholder_unfilled_order_does_not_increase_exposur
     # Exposure provider remains unchanged; risk should still treat exposure as zero-filled.
     ok2, _ = rm.validate_order(order)
     assert ok2
+
+
+def test_validate_batch_enforces_exposure_across_orders_in_same_cycle():
+    rm = RiskManager(
+        RiskLimits(max_total_exposure_usd=50, max_order_usd=20, max_orders_per_hour=10),
+        exposure_provider=lambda: 40.0,
+    )
+    orders = [
+        LimitOrderRequest(token_id="1", outcome="15", price=0.2, size_usd=10),
+        LimitOrderRequest(token_id="2", outcome="16", price=0.2, size_usd=10),
+    ]
+
+    approved, blocked = rm.validate_batch(orders)
+
+    assert approved == [orders[0]]
+    assert len(blocked) == 1
+    assert blocked[0][0] == orders[1]
+    assert "total exposure" in blocked[0][1]
+
+
+def test_validate_batch_enforces_per_hour_capacity_across_orders_in_same_cycle():
+    now = datetime(2026, 3, 5, 12, 0, tzinfo=timezone.utc)
+
+    def _now_provider() -> datetime:
+        return now
+
+    rm = RiskManager(
+        RiskLimits(max_total_exposure_usd=100, max_order_usd=20, max_orders_per_hour=2),
+        now_provider=_now_provider,
+    )
+    rm.state.order_timestamps = [now - timedelta(minutes=10)]
+    orders = [
+        LimitOrderRequest(token_id="1", outcome="15", price=0.2, size_usd=10),
+        LimitOrderRequest(token_id="2", outcome="16", price=0.2, size_usd=10),
+    ]
+
+    approved, blocked = rm.validate_batch(orders)
+
+    assert approved == [orders[0]]
+    assert len(blocked) == 1
+    assert blocked[0][0] == orders[1]
+    assert "per_hour" in blocked[0][1]
