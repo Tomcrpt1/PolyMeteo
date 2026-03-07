@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from src.config import Settings
 from src.logger import setup_logger
 from src.polymarket.clob_client import PolymarketClient
+from src.polymarket.market_resolution import resolve_market_url
 from src.polymarket.markets import BUCKETS
 from src.polymarket.models import LimitOrderRequest
 from src.polymarket.trader import Trader
@@ -191,11 +192,13 @@ def main() -> None:
     settings = Settings()
     if args.mode:
         settings.mode = args.mode
+    target_date = parse_date(settings.date_iso)
+    market_url = resolve_market_url(settings, target_date)
 
     log = setup_logger()
     weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
-    pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key)
+    pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key, market_url=market_url)
     trader = Trader(pm)
     risk = RiskManager(
         RiskLimits(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from urllib.parse import urlparse
 
 import httpx
 
@@ -11,17 +12,33 @@ from src.utils.retry import network_retry
 
 
 class PolymarketClient:
-    def __init__(self, market_id: str | None, mode: str, private_key: str | None = None):
+    def __init__(self, market_id: str | None, mode: str, private_key: str | None = None, market_url: str | None = None):
         self.market_id = market_id
+        self.market_url = market_url
         self.mode = mode
         self.private_key = private_key
         self.log = logging.getLogger("polymeteo")
         self.http = httpx.Client(timeout=15)
 
+    def _resolve_market_id_from_url(self) -> str:
+        if not self.market_url:
+            raise ValueError("market_url required to resolve market_id")
+        slug = urlparse(self.market_url).path.rstrip("/").split("/")[-1]
+        if not slug:
+            raise ValueError(f"Unable to parse market slug from MARKET_URL={self.market_url}")
+        url = "https://gamma-api.polymarket.com/markets"
+        response = self.http.get(url, params={"slug": slug})
+        data = response.json()
+        if isinstance(data, list) and data:
+            market_id = data[0].get("id")
+            if market_id:
+                return str(market_id)
+        raise ValueError(f"Could not resolve market_id from MARKET_URL={self.market_url}")
+
     @network_retry
     def fetch_market_tokens(self) -> dict[str, str]:
         if not self.market_id:
-            raise ValueError("market_id required to fetch tokens")
+            self.market_id = self._resolve_market_id_from_url()
         url = f"https://gamma-api.polymarket.com/markets/{self.market_id}"
         data = self.http.get(url).json()
         outcomes = data.get("outcomes") or []

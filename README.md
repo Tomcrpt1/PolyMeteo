@@ -44,7 +44,9 @@ All runtime knobs are in `.env.example`, including:
 
 - `MODE=paper|live`
 - `POLYMARKET_PRIVATE_KEY`, `POLYMARKET_API_KEY`
-- `MARKET_ID` or `MARKET_URL`
+- `MARKET_ID` or `MARKET_URL` (optional; leave empty to auto-build from `TARGET_DATE`)
+- `MARKET_URL_TEMPLATE` (default: `https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}`)
+- `MARKET_CITY_SLUG` (default: `paris`; useful when your template includes `{city_slug}`)
 - `MAX_TOTAL_EXPOSURE_USD`, `MAX_ORDER_USD`, `MAX_ORDERS_PER_HOUR`
 - `EDGE_THRESHOLD`, optional `FORECAST_TMAX_C`, `PRIOR_SIGMA_C`
 - `STRATEGY_MODE=lock19|legacy`
@@ -54,6 +56,8 @@ All runtime knobs are in `.env.example`, including:
 - `HEDGE_ONLY_IF_EDGE_POSITIVE`, `MAIN_ONLY_IF_EDGE_POSITIVE`
 - `WEATHER_POLL_SECONDS`, `MARKET_POLL_SECONDS`, `WU_POLL_SECONDS`
 - `TIMEZONE=Europe/Paris`
+
+If `MARKET_URL` is empty and `MARKET_ID` is not set, the bot builds market URL from `TARGET_DATE` using `MARKET_URL_TEMPLATE`.
 
 ## LOCK@19H + HEDGE strategy
 
