@@ -83,12 +83,21 @@ def fetch_weather_snapshot(
     target_date: date,
     weather_client: OpenMeteoClient,
     wu_client: WundergroundClient | None,
+    now_local: datetime,
+    log: logging.Logger,
 ) -> tuple[WeatherConditions, int | None]:
     conditions = weather_client.fetch_hourly_conditions(target_date, settings.latitude, settings.longitude, settings.timezone)
     wu_value = None
     if wu_client:
-        wu = wu_client.fetch_daily_high_so_far()
-        wu_value = wu.high_so_far_c
+        if target_date == now_local.date():
+            wu = wu_client.fetch_daily_high_so_far()
+            wu_value = wu.high_so_far_c
+        else:
+            log.info(
+                "skipping wunderground sanity-check because target_date=%s differs from local_date=%s",
+                target_date.isoformat(),
+                now_local.date().isoformat(),
+            )
     return conditions, wu_value
 
 
@@ -122,11 +131,19 @@ def build_bot_session(settings: Settings, target_date: date) -> BotSession:
     )
 
 
-def maybe_rollover_session(settings: Settings, now_local: datetime, session: BotSession, log: logging.Logger) -> BotSession:
+def maybe_rollover_session(
+    settings: Settings,
+    now_local: datetime,
+    session: BotSession,
+    log: logging.Logger,
+    wu_client: WundergroundClient | None,
+) -> BotSession:
     active_target_date = resolve_active_target_date(settings, now_local)
     if active_target_date == session.target_date:
         return session
     new_session = build_bot_session(settings, active_target_date)
+    if wu_client:
+        wu_client.reset_cache()
     log.info(
         "target-date rollover old=%s new=%s market_url=%s",
         session.target_date.isoformat(),
@@ -276,7 +293,7 @@ def run_scheduled_cycle(
     now_local: datetime,
 ) -> None:
     if session.polling.next_weather_poll_at is None or now_local >= session.polling.next_weather_poll_at or session.polling.weather is None:
-        session.polling.weather, session.polling.wu_value = fetch_weather_snapshot(settings, session.target_date, weather_client, wu_client)
+        session.polling.weather, session.polling.wu_value = fetch_weather_snapshot(settings, session.target_date, weather_client, wu_client, now_local, log)
         session.polling.next_weather_poll_at = now_local + timedelta(seconds=settings.weather_poll_seconds)
     if session.polling.next_market_poll_at is None or now_local >= session.polling.next_market_poll_at or session.polling.market is None:
         session.polling.market = fetch_market_snapshot(session.pm_client)
@@ -324,7 +341,7 @@ def main() -> None:
 
     while True:
         now_local = now_tz(settings.timezone)
-        session = maybe_rollover_session(settings, now_local, session, log)
+        session = maybe_rollover_session(settings, now_local, session, log, wu)
         run_scheduled_cycle(settings, session, weather, wu, log, now_local)
         next_due = min(session.polling.next_weather_poll_at, session.polling.next_market_poll_at)
         sleep_seconds = max(0.5, (next_due - now_local).total_seconds())

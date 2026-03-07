@@ -87,15 +87,6 @@ Recommended lock19 one-bucket setup:
 - `MAIN_ONLY_IF_EDGE_POSITIVE=false` (always place the main lock-time bet)
 - `HEDGE_ENABLED=false` (pure one-bucket mode)
 
-If `MARKET_URL` is empty and `MARKET_ID` is not set, the bot builds market URL from `TARGET_DATE` using `MARKET_URL_TEMPLATE`.
-
-Recommended lock19 one-bucket setup:
-
-- `LOCK_TIME_LOCAL=17:30`
-- `LOCK_WINDOW_START_LOCAL=13:00`
-- `MAIN_ONLY_IF_EDGE_POSITIVE=false` (always place the main lock-time bet)
-- `HEDGE_ENABLED=false` (pure one-bucket mode)
-
 ## LOCK@19H + HEDGE strategy
 
 - Before local lock time (`LOCK_TIME_LOCAL`), the bot monitors only and does not place the main bet.

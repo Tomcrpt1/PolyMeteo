@@ -1,4 +1,5 @@
 from datetime import date, datetime, time
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -68,6 +69,20 @@ class FakeSettings:
     timezone = "Europe/Paris"
     weather_poll_seconds = 300
     market_poll_seconds = 60
+
+
+class FakeWUClient:
+    def __init__(self, value: int = 20):
+        self.value = value
+        self.calls = 0
+        self.reset_calls = 0
+
+    def fetch_daily_high_so_far(self):
+        self.calls += 1
+        return SimpleNamespace(high_so_far_c=self.value)
+
+    def reset_cache(self):
+        self.reset_calls += 1
 
 
 def _session_for_polling(target_date: date, pm: FakePMClient | None = None) -> BotSession:
@@ -284,13 +299,15 @@ def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
 
     monkeypatch.setattr("src.main.build_bot_session", _fake_build)
 
-    new_session = maybe_rollover_session(settings, datetime(2026, 3, 6, 0, 1, tzinfo=TZ), old_session, log)
+    wu = FakeWUClient()
+    new_session = maybe_rollover_session(settings, datetime(2026, 3, 6, 0, 1, tzinfo=TZ), old_session, log, wu)
 
     assert new_session.target_date == date(2026, 3, 6)
     assert new_session.market_url.endswith("march-6-2026")
     assert new_session.polling.weather is None
     assert new_session.polling.market is None
     assert new_session is not old_session
+    assert wu.reset_calls == 1
     assert any("target-date rollover" in message for message in log.messages)
 
 
@@ -300,10 +317,71 @@ def test_day_rollover_disabled_keeps_same_session():
     settings.date_iso = "2026-03-05"
     session = _session_for_polling(date(2026, 3, 5))
 
-    same = maybe_rollover_session(settings, datetime(2026, 3, 6, 0, 1, tzinfo=TZ), session, SimpleNamespace(info=lambda *args, **kwargs: None))
+    same = maybe_rollover_session(
+        settings,
+        datetime(2026, 3, 6, 0, 1, tzinfo=TZ),
+        session,
+        SimpleNamespace(info=lambda *args, **kwargs: None),
+        FakeWUClient(),
+    )
 
     assert same is session
     assert same.target_date == date(2026, 3, 5)
+
+
+def test_wu_sanity_check_skipped_when_target_date_differs_from_local_date(monkeypatch):
+    settings = FakeSettings()
+    session = _session_for_polling(date(2026, 3, 4))
+    weather = FakeWeatherClient()
+    wu = FakeWUClient(value=99)
+    messages: list[str] = []
+
+    monkeypatch.setattr("src.main.evaluate_and_trade", lambda **kwargs: None)
+
+    class _Log:
+        def info(self, msg, *args):
+            messages.append(msg % args)
+
+    run_scheduled_cycle(
+        settings=settings,
+        session=session,
+        weather_client=weather,
+        wu_client=wu,
+        log=_Log(),
+        now_local=datetime(2026, 3, 5, 12, 0, tzinfo=TZ),
+    )
+
+    assert wu.calls == 0
+    assert session.polling.wu_value is None
+    assert any("skipping wunderground sanity-check" in message for message in messages)
+
+
+def test_wu_sanity_check_runs_when_target_date_matches_local_date(monkeypatch):
+    settings = FakeSettings()
+    session = _session_for_polling(date(2026, 3, 5))
+    weather = FakeWeatherClient()
+    wu = FakeWUClient(value=17)
+
+    monkeypatch.setattr("src.main.evaluate_and_trade", lambda **kwargs: None)
+
+    run_scheduled_cycle(
+        settings=settings,
+        session=session,
+        weather_client=weather,
+        wu_client=wu,
+        log=SimpleNamespace(info=lambda *args, **kwargs: None),
+        now_local=datetime(2026, 3, 5, 12, 0, tzinfo=TZ),
+    )
+
+    assert wu.calls == 1
+    assert session.polling.wu_value == 17
+
+
+def test_execution_state_defined_once():
+    import src.polymarket.trader as trader_module
+
+    source = Path(trader_module.__file__).read_text(encoding="utf-8")
+    assert source.count("class ExecutionState") == 1
 
 
 def test_live_mode_raises_descriptive_not_implemented_error():

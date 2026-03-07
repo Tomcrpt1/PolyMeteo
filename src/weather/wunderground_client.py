@@ -25,6 +25,9 @@ class WundergroundClient:
         self.client = httpx.Client(timeout=20)
         self._cached: WundergroundReading | None = None
 
+    def reset_cache(self) -> None:
+        self._cached = None
+
     @network_retry
     def fetch_daily_high_so_far(self) -> WundergroundReading:
         now = datetime.utcnow()
