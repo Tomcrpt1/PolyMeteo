@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from src.polymarket.models import LimitOrderRequest
 
 
 @dataclass(slots=True)
 class RiskState:
-    open_exposure_usd: float = 0.0
-    orders_in_last_hour: int = 0
+    order_timestamps: list[datetime]
 
 
 @dataclass(slots=True)
@@ -19,19 +20,71 @@ class RiskLimits:
 
 
 class RiskManager:
-    def __init__(self, limits: RiskLimits):
+    def __init__(
+        self,
+        limits: RiskLimits,
+        exposure_provider: Callable[[], float] | None = None,
+        now_provider: Callable[[], datetime] | None = None,
+    ):
         self.limits = limits
-        self.state = RiskState()
+        self.state = RiskState(order_timestamps=[])
+        self._exposure_provider = exposure_provider or (lambda: 0.0)
+        self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
+
+    def _now_utc(self) -> datetime:
+        current = self._now_provider()
+        if current.tzinfo is None:
+            return current.replace(tzinfo=timezone.utc)
+        return current.astimezone(timezone.utc)
+
+    def _purge_old_order_timestamps(self, now_utc: datetime) -> None:
+        cutoff = now_utc - timedelta(hours=1)
+        self.state.order_timestamps = [ts for ts in self.state.order_timestamps if ts >= cutoff]
+
+    def get_current_exposure_usd(self) -> float:
+        return float(self._exposure_provider())
 
     def validate_order(self, order: LimitOrderRequest) -> tuple[bool, str]:
+        now_utc = self._now_utc()
+        self._purge_old_order_timestamps(now_utc)
+
         if order.size_usd > self.limits.max_order_usd:
             return False, "order exceeds max_order_usd"
-        if self.state.open_exposure_usd + order.size_usd > self.limits.max_total_exposure_usd:
+        if self.get_current_exposure_usd() + order.size_usd > self.limits.max_total_exposure_usd:
             return False, "total exposure limit"
-        if self.state.orders_in_last_hour >= self.limits.max_orders_per_hour:
+        if len(self.state.order_timestamps) >= self.limits.max_orders_per_hour:
             return False, "max_orders_per_hour reached"
         return True, "ok"
 
+    def validate_batch(self, orders: list[LimitOrderRequest]) -> tuple[list[LimitOrderRequest], list[tuple[LimitOrderRequest, str]]]:
+        now_utc = self._now_utc()
+        self._purge_old_order_timestamps(now_utc)
+        current_exposure = self.get_current_exposure_usd()
+        reserved_exposure = 0.0
+        reserved_orders = 0
+
+        approved: list[LimitOrderRequest] = []
+        blocked: list[tuple[LimitOrderRequest, str]] = []
+
+        for order in orders:
+            if order.size_usd > self.limits.max_order_usd:
+                blocked.append((order, "order exceeds max_order_usd"))
+                continue
+            if current_exposure + reserved_exposure + order.size_usd > self.limits.max_total_exposure_usd:
+                blocked.append((order, "total exposure limit"))
+                continue
+            if len(self.state.order_timestamps) + reserved_orders >= self.limits.max_orders_per_hour:
+                blocked.append((order, "max_orders_per_hour reached"))
+                continue
+
+            approved.append(order)
+            reserved_exposure += order.size_usd
+            reserved_orders += 1
+
+        return approved, blocked
+
     def register_order(self, order: LimitOrderRequest) -> None:
-        self.state.open_exposure_usd += order.size_usd
-        self.state.orders_in_last_hour += 1
+        _ = order
+        now_utc = self._now_utc()
+        self._purge_old_order_timestamps(now_utc)
+        self.state.order_timestamps.append(now_utc)
