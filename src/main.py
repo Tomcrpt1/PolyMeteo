@@ -4,12 +4,14 @@ import argparse
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from src.config import Settings
 from src.logger import setup_logger
 from src.polymarket.clob_client import PolymarketClient
+from src.polymarket.market_resolution import resolve_market_url
 from src.polymarket.markets import BUCKETS
-from src.polymarket.models import LimitOrderRequest
+from src.polymarket.models import LimitOrderRequest, OutcomeBook
 from src.polymarket.trader import Trader
 from src.risk.kill_switch import kill_switch_active
 from src.risk.limits import RiskLimits, RiskManager
@@ -20,7 +22,7 @@ from src.strategy.nowcast import update_intraday_distribution
 from src.strategy.prior import resolve_forecast_tmax
 from src.strategy.priors import gaussian_prior
 from src.utils.time import now_tz, parse_date
-from src.weather.models import TemperatureSample
+from src.weather.models import TemperatureSample, WeatherConditions
 from src.weather.open_meteo_client import OpenMeteoClient
 from src.weather.wunderground_client import WundergroundClient
 
@@ -30,28 +32,61 @@ class RuntimeState:
     lock19: Lock19State = field(default_factory=Lock19State)
 
 
-def run_cycle(
+@dataclass(slots=True)
+class MarketSnapshot:
+    token_map: dict[str, str]
+    books: dict[str, OutcomeBook]
+    implied: dict[str, float]
+
+
+@dataclass(slots=True)
+class PollingState:
+    weather: WeatherConditions | None = None
+    wu_value: int | None = None
+    market: MarketSnapshot | None = None
+    next_weather_poll_at: datetime | None = None
+    next_market_poll_at: datetime | None = None
+
+
+def sync_lock19_exposure_from_execution(runtime: RuntimeState, trader: Trader) -> None:
+    runtime.lock19.main_exposure_usd = trader.execution.lock19_main_exposure_usd
+    runtime.lock19.hedge_exposure_usd = trader.execution.lock19_hedge_exposure_usd
+
+
+def fetch_weather_snapshot(settings: Settings, weather_client: OpenMeteoClient, wu_client: WundergroundClient | None) -> tuple[WeatherConditions, int | None]:
+    target_date = parse_date(settings.date_iso)
+    conditions = weather_client.fetch_hourly_conditions(target_date, settings.latitude, settings.longitude, settings.timezone)
+    wu_value = None
+    if wu_client:
+        wu = wu_client.fetch_daily_high_so_far()
+        wu_value = wu.high_so_far_c
+    return conditions, wu_value
+
+
+def fetch_market_snapshot(pm_client: PolymarketClient) -> MarketSnapshot:
+    token_map = pm_client.fetch_market_tokens()
+    books = pm_client.fetch_orderbooks(token_map)
+    implied = pm_client.implied_probabilities(books)
+    return MarketSnapshot(token_map=token_map, books=books, implied=implied)
+
+
+def evaluate_and_trade(
     settings: Settings,
-    weather_client: OpenMeteoClient,
-    wu_client: WundergroundClient | None,
     pm_client: PolymarketClient,
     trader: Trader,
     risk: RiskManager,
     log: logging.Logger,
     runtime: RuntimeState,
+    conditions: WeatherConditions,
+    wu_value: int | None,
+    market: MarketSnapshot,
 ) -> None:
     if kill_switch_active(settings.kill_switch_env, settings.kill_switch_file):
         log.warning("Kill switch active; monitoring only")
         return
 
     target_date = parse_date(settings.date_iso)
-    conditions = weather_client.fetch_hourly_conditions(target_date, settings.latitude, settings.longitude, settings.timezone)
     rounded_max = int(round(conditions.max_temp_so_far_c)) if settings.temperature_rounding == "round" else int(conditions.max_temp_so_far_c)
-
-    wu_value = None
-    if wu_client:
-        wu = wu_client.fetch_daily_high_so_far()
-        wu_value = wu.high_so_far_c
 
     now_local = now_tz(settings.timezone)
     resolved_forecast_tmax = resolve_forecast_tmax(
@@ -84,9 +119,9 @@ def run_cycle(
     top = sorted(posterior.items(), key=lambda x: x[1], reverse=True)[:3]
     log.info("model top buckets: %s", top)
 
-    token_map = pm_client.fetch_market_tokens()
-    books = pm_client.fetch_orderbooks(token_map)
-    implied = pm_client.implied_probabilities(books)
+    token_map = market.token_map
+    books = market.books
+    implied = market.implied
     log.info("market implied: %s", {b: round(implied.get(b, 0), 3) for b in BUCKETS})
 
     if settings.strategy_mode == "legacy":
@@ -102,6 +137,7 @@ def run_cycle(
             return
         candidate_orders = decision.orders
     else:
+        sync_lock19_exposure_from_execution(runtime, trader)
         plan = decide_lock19(
             state=runtime.lock19,
             inputs=Lock19Inputs(
@@ -166,15 +202,46 @@ def run_cycle(
         log.info("all orders blocked by risk")
         return
 
-    ids = trader.requote(approved)
+    lock19_main_bucket = runtime.lock19.main_bucket if settings.strategy_mode == "lock19" else None
+    ids = trader.requote(approved, lock19_main_bucket=lock19_main_bucket)
     for order in approved:
         risk.register_order(order)
-        if settings.strategy_mode == "lock19":
-            if runtime.lock19.main_bucket == order.outcome:
-                runtime.lock19.main_exposure_usd += order.size_usd
-            else:
-                runtime.lock19.hedge_exposure_usd += order.size_usd
     log.info("placed %d orders ids=%s", len(ids), ids)
+
+
+def run_scheduled_cycle(
+    settings: Settings,
+    weather_client: OpenMeteoClient,
+    wu_client: WundergroundClient | None,
+    pm_client: PolymarketClient,
+    trader: Trader,
+    risk: RiskManager,
+    log: logging.Logger,
+    runtime: RuntimeState,
+    polling: PollingState,
+    now_local: datetime,
+) -> None:
+    if polling.next_weather_poll_at is None or now_local >= polling.next_weather_poll_at or polling.weather is None:
+        polling.weather, polling.wu_value = fetch_weather_snapshot(settings, weather_client, wu_client)
+        polling.next_weather_poll_at = now_local + timedelta(seconds=settings.weather_poll_seconds)
+    if polling.next_market_poll_at is None or now_local >= polling.next_market_poll_at or polling.market is None:
+        polling.market = fetch_market_snapshot(pm_client)
+        polling.next_market_poll_at = now_local + timedelta(seconds=settings.market_poll_seconds)
+
+    if polling.weather is None or polling.market is None:
+        return
+
+    evaluate_and_trade(
+        settings=settings,
+        pm_client=pm_client,
+        trader=trader,
+        risk=risk,
+        log=log,
+        runtime=runtime,
+        conditions=polling.weather,
+        wu_value=polling.wu_value,
+        market=polling.market,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -192,10 +259,19 @@ def main() -> None:
     if args.mode:
         settings.mode = args.mode
 
+    if settings.mode == "live":
+        raise RuntimeError(
+            "MODE=live is not fully implemented yet. "
+            "Order placement remains paper-only until signed CLOB execution is integrated."
+        )
+
+    target_date = parse_date(settings.date_iso)
+    market_url = resolve_market_url(settings, target_date)
+
     log = setup_logger()
     weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
-    pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key)
+    pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key, market_url=market_url)
     trader = Trader(pm)
     risk = RiskManager(
         RiskLimits(
@@ -205,14 +281,18 @@ def main() -> None:
         )
     )
     runtime = RuntimeState()
+    polling = PollingState()
 
     if args.once:
-        run_cycle(settings, weather, wu, pm, trader, risk, log, runtime)
+        run_scheduled_cycle(settings, weather, wu, pm, trader, risk, log, runtime, polling, now_tz(settings.timezone))
         return
 
     while True:
-        run_cycle(settings, weather, wu, pm, trader, risk, log, runtime)
-        time.sleep(min(settings.weather_poll_seconds, settings.market_poll_seconds))
+        now_local = now_tz(settings.timezone)
+        run_scheduled_cycle(settings, weather, wu, pm, trader, risk, log, runtime, polling, now_local)
+        next_due = min(polling.next_weather_poll_at, polling.next_market_poll_at)
+        sleep_seconds = max(0.5, (next_due - now_local).total_seconds())
+        time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":
