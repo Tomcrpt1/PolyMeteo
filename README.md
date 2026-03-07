@@ -43,7 +43,12 @@ python -m src.main --mode paper
 
 For normal daily operation, you usually only change:
 
-- `TARGET_DATE=YYYY-MM-DD`
+- nothing (default auto-rollover), or `TARGET_DATE=YYYY-MM-DD` if you disable rollover
+
+Date behavior is controlled by:
+
+- `AUTO_ROLLOVER_TARGET_DATE=true` (default): bot follows Europe/Paris local calendar date automatically.
+- `AUTO_ROLLOVER_TARGET_DATE=false`: bot uses fixed `TARGET_DATE` from config.
 
 Keep these defaults unless you have a custom market naming scheme:
 
@@ -51,6 +56,7 @@ Keep these defaults unless you have a custom market naming scheme:
 - `MARKET_URL_TEMPLATE=https://polymarket.com/event/highest-temperature-in-paris-on-{month_name}-{day}-{year}`
 
 With those settings, the bot auto-builds the daily Polymarket event URL from `TARGET_DATE` (lowercase English month name and non-zero-padded day).
+With `AUTO_ROLLOVER_TARGET_DATE=true`, `TARGET_DATE` is ignored after startup and recomputed from local date each cycle.
 
 ## Environment variables
 
@@ -70,6 +76,16 @@ All runtime knobs are in `.env.example`, including:
 - `HEDGE_ONLY_IF_EDGE_POSITIVE`, `MAIN_ONLY_IF_EDGE_POSITIVE`
 - `WEATHER_POLL_SECONDS`, `MARKET_POLL_SECONDS`, `WU_POLL_SECONDS`
 - `TIMEZONE=Europe/Paris`
+- `AUTO_ROLLOVER_TARGET_DATE=true|false`
+
+If `MARKET_URL` is empty and `MARKET_ID` is not set, the bot builds market URL from `TARGET_DATE` using `MARKET_URL_TEMPLATE`.
+
+Recommended lock19 one-bucket setup:
+
+- `LOCK_TIME_LOCAL=17:30`
+- `LOCK_WINDOW_START_LOCAL=13:00`
+- `MAIN_ONLY_IF_EDGE_POSITIVE=false` (always place the main lock-time bet)
+- `HEDGE_ENABLED=false` (pure one-bucket mode)
 
 If `MARKET_URL` is empty and `MARKET_ID` is not set, the bot builds market URL from `TARGET_DATE` using `MARKET_URL_TEMPLATE`.
 

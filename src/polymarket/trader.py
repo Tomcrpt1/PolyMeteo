@@ -10,7 +10,33 @@ from src.polymarket.models import LimitOrderRequest
 @dataclass(slots=True)
 class TraderState:
     open_orders: dict[str, LimitOrderRequest] = field(default_factory=dict)
-    orders_placed_hour: int = 0
+
+
+@dataclass(slots=True)
+class ExecutionState:
+    """Execution-grounded exposure state.
+
+    In paper mode, fills are simulated as immediate and update this tracker.
+    In live mode, this should be populated from exchange fills/positions.
+    """
+
+    lock19_main_exposure_usd: float = 0.0
+    lock19_hedge_exposure_usd: float = 0.0
+    legacy_exposure_usd: float = 0.0
+
+    def register_lock19_fill(self, order: LimitOrderRequest, main_bucket: str | None) -> None:
+        if main_bucket and order.outcome == main_bucket:
+            self.lock19_main_exposure_usd += order.size_usd
+        else:
+            self.lock19_hedge_exposure_usd += order.size_usd
+
+    def register_legacy_fill(self, order: LimitOrderRequest) -> None:
+        self.legacy_exposure_usd += order.size_usd
+
+    def exposure_for_mode(self, strategy_mode: str) -> float:
+        if strategy_mode == "legacy":
+            return self.legacy_exposure_usd
+        return self.lock19_main_exposure_usd + self.lock19_hedge_exposure_usd
 
 
 @dataclass(slots=True)
@@ -57,7 +83,6 @@ class Trader:
         for order in desired_orders:
             order_id = self.client.place_limit_order(order)
             self.state.open_orders[order_id] = order
-            self.state.orders_placed_hour += 1
             if self.client.mode == "paper":
                 if strategy_mode == "legacy":
                     self.execution.register_legacy_fill(order)

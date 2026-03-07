@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     latitude: float = Field(default=49.0097, alias="LFPG_LATITUDE")
     longitude: float = Field(default=2.5479, alias="LFPG_LONGITUDE")
     date_iso: str = Field(default="2026-03-03", alias="TARGET_DATE")
+    auto_rollover_target_date: bool = Field(default=True, alias="AUTO_ROLLOVER_TARGET_DATE")
 
     kill_switch_env: int = Field(default=0, alias="KILL_SWITCH")
     kill_switch_path: str = Field(default="KILL", alias="KILL_SWITCH_PATH")

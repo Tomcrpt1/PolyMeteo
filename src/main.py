@@ -48,13 +48,34 @@ class PollingState:
     next_market_poll_at: datetime | None = None
 
 
+@dataclass(slots=True)
+class BotSession:
+    target_date: date
+    market_url: str | None
+    pm_client: PolymarketClient
+    trader: Trader
+    risk: RiskManager
+    runtime: RuntimeState
+    polling: PollingState
+
+
+def require_paper_mode(settings: Settings) -> None:
+    if settings.mode == "live":
+        raise RuntimeError(
+            "MODE=live is not fully implemented yet. "
+            "Order placement remains paper-only until signed CLOB execution is integrated."
+        )
+
+
+def resolve_active_target_date(settings: Settings, now_local: datetime) -> date:
+    if settings.auto_rollover_target_date:
+        return now_local.date()
+    return parse_date(settings.date_iso)
+
+
 def sync_lock19_exposure_from_execution(runtime: RuntimeState, trader: Trader) -> None:
     runtime.lock19.main_exposure_usd = trader.execution.lock19_main_exposure_usd
     runtime.lock19.hedge_exposure_usd = trader.execution.lock19_hedge_exposure_usd
-
-
-def resolve_target_date(settings: Settings) -> date:
-    return parse_date(settings.date_iso)
 
 
 def fetch_weather_snapshot(
@@ -78,14 +99,47 @@ def fetch_market_snapshot(pm_client: PolymarketClient) -> MarketSnapshot:
     return MarketSnapshot(token_map=token_map, books=books, implied=implied)
 
 
+def build_bot_session(settings: Settings, target_date: date) -> BotSession:
+    market_url = resolve_market_url(settings, target_date)
+    pm_client = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key, market_url=market_url)
+    trader = Trader(pm_client)
+    risk = RiskManager(
+        RiskLimits(
+            max_total_exposure_usd=settings.max_total_exposure_usd,
+            max_order_usd=settings.max_order_usd,
+            max_orders_per_hour=settings.max_orders_per_hour,
+        ),
+        exposure_provider=lambda: trader.execution.exposure_for_mode(settings.strategy_mode),
+    )
+    return BotSession(
+        target_date=target_date,
+        market_url=market_url,
+        pm_client=pm_client,
+        trader=trader,
+        risk=risk,
+        runtime=RuntimeState(),
+        polling=PollingState(),
+    )
+
+
+def maybe_rollover_session(settings: Settings, now_local: datetime, session: BotSession, log: logging.Logger) -> BotSession:
+    active_target_date = resolve_active_target_date(settings, now_local)
+    if active_target_date == session.target_date:
+        return session
+    new_session = build_bot_session(settings, active_target_date)
+    log.info(
+        "target-date rollover old=%s new=%s market_url=%s",
+        session.target_date.isoformat(),
+        new_session.target_date.isoformat(),
+        new_session.market_url,
+    )
+    return new_session
+
+
 def evaluate_and_trade(
     settings: Settings,
-    target_date: date,
-    pm_client: PolymarketClient,
-    trader: Trader,
-    risk: RiskManager,
+    session: BotSession,
     log: logging.Logger,
-    runtime: RuntimeState,
     conditions: WeatherConditions,
     wu_value: int | None,
     market: MarketSnapshot,
@@ -99,7 +153,7 @@ def evaluate_and_trade(
     now_local = now_tz(settings.timezone)
     resolved_forecast_tmax = resolve_forecast_tmax(
         configured_forecast_tmax=settings.forecast_tmax_c,
-        target_date=target_date,
+        target_date=session.target_date,
         latitude=settings.latitude,
         longitude=settings.longitude,
         timezone=settings.timezone,
@@ -145,12 +199,12 @@ def evaluate_and_trade(
             return
         candidate_orders = decision.orders
     else:
-        sync_lock19_exposure_from_execution(runtime, trader)
+        sync_lock19_exposure_from_execution(session.runtime, session.trader)
         plan = decide_lock19(
-            state=runtime.lock19,
+            state=session.runtime.lock19,
             inputs=Lock19Inputs(
                 now_local=now_local,
-                target_date=target_date,
+                target_date=session.target_date,
                 records=conditions.records,
                 lock_time=settings.lock_time,
                 lock_window_start=settings.lock_window_start,
@@ -198,7 +252,7 @@ def evaluate_and_trade(
             log.info("no trade: %s", plan.reason or "no lock19 orders")
             return
 
-    approved, blocked = risk.validate_batch(candidate_orders)
+    approved, blocked = session.risk.validate_batch(candidate_orders)
     for blocked_order, reason in blocked:
         log.warning("risk blocked order %s: %s", blocked_order.outcome, reason)
 
@@ -206,47 +260,38 @@ def evaluate_and_trade(
         log.info("all orders blocked by risk")
         return
 
-    lock19_main_bucket = runtime.lock19.main_bucket if settings.strategy_mode == "lock19" else None
-    ids = trader.requote(approved, lock19_main_bucket=lock19_main_bucket, strategy_mode=settings.strategy_mode)
+    lock19_main_bucket = session.runtime.lock19.main_bucket if settings.strategy_mode == "lock19" else None
+    ids = session.trader.requote(approved, lock19_main_bucket=lock19_main_bucket, strategy_mode=settings.strategy_mode)
     for order in approved:
-        risk.register_order(order)
+        session.risk.register_order(order)
     log.info("placed %d orders ids=%s", len(ids), ids)
 
 
 def run_scheduled_cycle(
     settings: Settings,
-    target_date: date,
+    session: BotSession,
     weather_client: OpenMeteoClient,
     wu_client: WundergroundClient | None,
-    pm_client: PolymarketClient,
-    trader: Trader,
-    risk: RiskManager,
     log: logging.Logger,
-    runtime: RuntimeState,
-    polling: PollingState,
     now_local: datetime,
 ) -> None:
-    if polling.next_weather_poll_at is None or now_local >= polling.next_weather_poll_at or polling.weather is None:
-        polling.weather, polling.wu_value = fetch_weather_snapshot(settings, target_date, weather_client, wu_client)
-        polling.next_weather_poll_at = now_local + timedelta(seconds=settings.weather_poll_seconds)
-    if polling.next_market_poll_at is None or now_local >= polling.next_market_poll_at or polling.market is None:
-        polling.market = fetch_market_snapshot(pm_client)
-        polling.next_market_poll_at = now_local + timedelta(seconds=settings.market_poll_seconds)
+    if session.polling.next_weather_poll_at is None or now_local >= session.polling.next_weather_poll_at or session.polling.weather is None:
+        session.polling.weather, session.polling.wu_value = fetch_weather_snapshot(settings, session.target_date, weather_client, wu_client)
+        session.polling.next_weather_poll_at = now_local + timedelta(seconds=settings.weather_poll_seconds)
+    if session.polling.next_market_poll_at is None or now_local >= session.polling.next_market_poll_at or session.polling.market is None:
+        session.polling.market = fetch_market_snapshot(session.pm_client)
+        session.polling.next_market_poll_at = now_local + timedelta(seconds=settings.market_poll_seconds)
 
-    if polling.weather is None or polling.market is None:
+    if session.polling.weather is None or session.polling.market is None:
         return
 
     evaluate_and_trade(
         settings=settings,
-        target_date=target_date,
-        pm_client=pm_client,
-        trader=trader,
-        risk=risk,
+        session=session,
         log=log,
-        runtime=runtime,
-        conditions=polling.weather,
-        wu_value=polling.wu_value,
-        market=polling.market,
+        conditions=session.polling.weather,
+        wu_value=session.polling.wu_value,
+        market=session.polling.market,
     )
 
 
@@ -264,60 +309,24 @@ def main() -> None:
     settings = Settings()
     if args.mode:
         settings.mode = args.mode
-    target_date = parse_date(settings.date_iso)
-    market_url = resolve_market_url(settings, target_date)
-
-    if settings.mode == "live":
-        raise RuntimeError(
-            "MODE=live is not fully implemented yet. "
-            "Order placement remains paper-only until signed CLOB execution is integrated."
-        )
-
-    target_date = parse_date(settings.date_iso)
-    market_url = resolve_market_url(settings, target_date)
-
-    if settings.mode == "live":
-        raise RuntimeError(
-            "MODE=live is not fully implemented yet. "
-            "Order placement remains paper-only until signed CLOB execution is integrated."
-        )
-
-    target_date = parse_date(settings.date_iso)
-    market_url = resolve_market_url(settings, target_date)
-
-    if settings.mode == "live":
-        raise RuntimeError(
-            "MODE=live is not fully implemented yet. "
-            "Order placement remains paper-only until signed CLOB execution is integrated."
-        )
-
-    target_date = resolve_target_date(settings)
-    market_url = resolve_market_url(settings, target_date)
+    require_paper_mode(settings)
 
     log = setup_logger()
     weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
-    pm = PolymarketClient(settings.market_id, settings.mode, settings.polymarket_private_key, market_url=market_url)
-    trader = Trader(pm)
-    risk = RiskManager(
-        RiskLimits(
-            max_total_exposure_usd=settings.max_total_exposure_usd,
-            max_order_usd=settings.max_order_usd,
-            max_orders_per_hour=settings.max_orders_per_hour,
-        ),
-        exposure_provider=lambda: trader.execution.exposure_for_mode(settings.strategy_mode),
-    )
-    runtime = RuntimeState()
-    polling = PollingState()
+
+    now_local = now_tz(settings.timezone)
+    session = build_bot_session(settings, resolve_active_target_date(settings, now_local))
 
     if args.once:
-        run_scheduled_cycle(settings, target_date, weather, wu, pm, trader, risk, log, runtime, polling, now_tz(settings.timezone))
+        run_scheduled_cycle(settings, session, weather, wu, log, now_local)
         return
 
     while True:
         now_local = now_tz(settings.timezone)
-        run_scheduled_cycle(settings, target_date, weather, wu, pm, trader, risk, log, runtime, polling, now_local)
-        next_due = min(polling.next_weather_poll_at, polling.next_market_poll_at)
+        session = maybe_rollover_session(settings, now_local, session, log)
+        run_scheduled_cycle(settings, session, weather, wu, log, now_local)
+        next_due = min(session.polling.next_weather_poll_at, session.polling.next_market_poll_at)
         sleep_seconds = max(0.5, (next_due - now_local).total_seconds())
         time.sleep(sleep_seconds)
 

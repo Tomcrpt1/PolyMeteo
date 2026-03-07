@@ -1,9 +1,18 @@
 from datetime import date, datetime, time
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.main import PollingState, RuntimeState, run_scheduled_cycle, sync_lock19_exposure_from_execution
+from src.main import (
+    BotSession,
+    PollingState,
+    RuntimeState,
+    maybe_rollover_session,
+    resolve_active_target_date,
+    run_scheduled_cycle,
+    sync_lock19_exposure_from_execution,
+)
 from src.polymarket.models import LimitOrderRequest
 from src.polymarket.trader import Trader
 from src.risk.limits import RiskLimits, RiskManager
@@ -53,6 +62,7 @@ class FakePMClient:
 
 class FakeSettings:
     date_iso = "2026-03-05"
+    auto_rollover_target_date = True
     latitude = 49.0097
     longitude = 2.5479
     timezone = "Europe/Paris"
@@ -60,11 +70,24 @@ class FakeSettings:
     market_poll_seconds = 60
 
 
+def _session_for_polling(target_date: date, pm: FakePMClient | None = None) -> BotSession:
+    pm_client = pm or FakePMClient()
+    return BotSession(
+        target_date=target_date,
+        market_url=f"https://example.com/{target_date.isoformat()}",
+        pm_client=pm_client,
+        trader=SimpleNamespace(),
+        risk=SimpleNamespace(),
+        runtime=RuntimeState(),
+        polling=PollingState(),
+    )
+
+
 def test_polling_separates_weather_and_market_refresh(monkeypatch):
     settings = FakeSettings()
     weather = FakeWeatherClient()
     pm = FakePMClient()
-    polling = PollingState()
+    session = _session_for_polling(date(2026, 3, 5), pm)
 
     monkeypatch.setattr("src.main.evaluate_and_trade", lambda **kwargs: None)
 
@@ -76,15 +99,10 @@ def test_polling_separates_weather_and_market_refresh(monkeypatch):
     ]:
         run_scheduled_cycle(
             settings=settings,
-            target_date=date(2026, 3, 5),
+            session=session,
             weather_client=weather,
             wu_client=None,
-            pm_client=pm,
-            trader=object(),
-            risk=object(),
             log=object(),
-            runtime=RuntimeState(),
-            polling=polling,
             now_local=current,
         )
 
@@ -97,40 +115,30 @@ def test_cached_weather_reused_until_weather_poll_due(monkeypatch):
     settings = FakeSettings()
     weather = FakeWeatherClient()
     pm = FakePMClient()
-    polling = PollingState()
+    session = _session_for_polling(date(2026, 3, 5), pm)
     monkeypatch.setattr("src.main.evaluate_and_trade", lambda **kwargs: None)
 
     run_scheduled_cycle(
         settings=settings,
-        target_date=date(2026, 3, 5),
+        session=session,
         weather_client=weather,
         wu_client=None,
-        pm_client=pm,
-        trader=object(),
-        risk=object(),
         log=object(),
-        runtime=RuntimeState(),
-        polling=polling,
         now_local=datetime(2026, 3, 5, 12, 0, tzinfo=TZ),
     )
-    first_weather = polling.weather
+    first_weather = session.polling.weather
 
     run_scheduled_cycle(
         settings=settings,
-        target_date=date(2026, 3, 5),
+        session=session,
         weather_client=weather,
         wu_client=None,
-        pm_client=pm,
-        trader=object(),
-        risk=object(),
         log=object(),
-        runtime=RuntimeState(),
-        polling=polling,
         now_local=datetime(2026, 3, 5, 12, 1, tzinfo=TZ),
     )
 
     assert weather.calls == 1
-    assert polling.weather is first_weather
+    assert session.polling.weather is first_weather
 
 
 class FakeClientForTrader:
@@ -222,6 +230,80 @@ def test_legacy_mode_exposure_provider_reads_legacy_execution_state():
 
     assert not ok
     assert "total exposure" in reason
+
+
+def test_resolve_active_target_date_auto_rollover_true():
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = True
+    settings.date_iso = "2026-03-03"
+
+    resolved = resolve_active_target_date(settings, datetime(2026, 3, 6, 0, 5, tzinfo=TZ))
+
+    assert resolved == date(2026, 3, 6)
+
+
+def test_resolve_active_target_date_auto_rollover_false():
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = False
+    settings.date_iso = "2026-03-03"
+
+    resolved = resolve_active_target_date(settings, datetime(2026, 3, 6, 0, 5, tzinfo=TZ))
+
+    assert resolved == date(2026, 3, 3)
+
+
+def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = True
+
+    class FakeLog:
+        def __init__(self):
+            self.messages = []
+
+        def info(self, msg, *args):
+            self.messages.append(msg % args)
+
+    log = FakeLog()
+    old_session = _session_for_polling(date(2026, 3, 5))
+    old_session.polling.weather = "stale"
+    old_session.polling.market = "stale"
+
+    def _fake_build(settings_obj, target_date):
+        trader = Trader(FakeClientForTrader())
+        trader.execution.lock19_main_exposure_usd = 0.0
+        session = BotSession(
+            target_date=target_date,
+            market_url=f"https://polymarket.com/event/highest-temperature-in-paris-on-march-{target_date.day}-2026",
+            pm_client=FakePMClient(),
+            trader=trader,
+            risk=SimpleNamespace(),
+            runtime=RuntimeState(),
+            polling=PollingState(),
+        )
+        return session
+
+    monkeypatch.setattr("src.main.build_bot_session", _fake_build)
+
+    new_session = maybe_rollover_session(settings, datetime(2026, 3, 6, 0, 1, tzinfo=TZ), old_session, log)
+
+    assert new_session.target_date == date(2026, 3, 6)
+    assert new_session.market_url.endswith("march-6-2026")
+    assert new_session.polling.weather is None
+    assert new_session.polling.market is None
+    assert new_session is not old_session
+    assert any("target-date rollover" in message for message in log.messages)
+
+
+def test_day_rollover_disabled_keeps_same_session():
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = False
+    settings.date_iso = "2026-03-05"
+    session = _session_for_polling(date(2026, 3, 5))
+
+    same = maybe_rollover_session(settings, datetime(2026, 3, 6, 0, 1, tzinfo=TZ), session, SimpleNamespace(info=lambda *args, **kwargs: None))
+
+    assert same is session
+    assert same.target_date == date(2026, 3, 5)
 
 
 def test_live_mode_raises_descriptive_not_implemented_error():
