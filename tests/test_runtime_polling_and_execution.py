@@ -191,6 +191,21 @@ def test_repeated_cycles_do_not_overbuy_when_target_already_filled():
     assert not plan.should_place_main
 
 
+def test_risk_reads_exposure_from_paper_execution_state():
+    trader = Trader(FakeClientForTrader())
+    risk = RiskManager(
+        RiskLimits(max_total_exposure_usd=30, max_order_usd=30, max_orders_per_hour=10),
+        exposure_provider=lambda: trader.execution.lock19_main_exposure_usd + trader.execution.lock19_hedge_exposure_usd,
+    )
+    order = LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=10)
+
+    trader.requote([order], lock19_main_bucket="19")
+    ok, reason = risk.validate_order(LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=25))
+
+    assert not ok
+    assert "total exposure" in reason
+
+
 def test_live_mode_raises_descriptive_not_implemented_error():
     from src.polymarket.clob_client import PolymarketClient
 

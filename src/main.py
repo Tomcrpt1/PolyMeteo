@@ -270,6 +270,15 @@ def main() -> None:
     target_date = parse_date(settings.date_iso)
     market_url = resolve_market_url(settings, target_date)
 
+    if settings.mode == "live":
+        raise RuntimeError(
+            "MODE=live is not fully implemented yet. "
+            "Order placement remains paper-only until signed CLOB execution is integrated."
+        )
+
+    target_date = parse_date(settings.date_iso)
+    market_url = resolve_market_url(settings, target_date)
+
     log = setup_logger()
     weather = OpenMeteoClient()
     wu = WundergroundClient("https://www.wunderground.com/history/daily/fr/paris/LFPG", settings.wu_poll_seconds)
@@ -280,7 +289,8 @@ def main() -> None:
             max_total_exposure_usd=settings.max_total_exposure_usd,
             max_order_usd=settings.max_order_usd,
             max_orders_per_hour=settings.max_orders_per_hour,
-        )
+        ),
+        exposure_provider=lambda: trader.execution.lock19_main_exposure_usd + trader.execution.lock19_hedge_exposure_usd,
     )
     runtime = RuntimeState()
     polling = PollingState()
