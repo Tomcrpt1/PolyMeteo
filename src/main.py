@@ -135,6 +135,13 @@ def carry_over_risk_state(previous_session: BotSession, new_session: BotSession)
     new_session.risk.state.order_timestamps = list(previous_session.risk.state.order_timestamps)
 
 
+def close_previous_session(session: BotSession, log: logging.Logger) -> None:
+    open_orders_before = len(session.trader.state.open_orders)
+    log.info("rollover: closing previous session with %d open orders", open_orders_before)
+    session.trader.close_session()
+    log.info("rollover: previous session closed; open orders now=%d", len(session.trader.state.open_orders))
+
+
 def maybe_rollover_session(
     settings: Settings,
     now_local: datetime,
@@ -145,6 +152,7 @@ def maybe_rollover_session(
     active_target_date = resolve_active_target_date(settings, now_local)
     if active_target_date == session.target_date:
         return session
+    close_previous_session(session, log)
     new_session = build_bot_session(settings, active_target_date)
     carry_over_risk_state(session, new_session)
     if wu_client:
@@ -155,6 +163,7 @@ def maybe_rollover_session(
         new_session.target_date.isoformat(),
         new_session.market_url,
     )
+    log.info("rollover: execution/runtime state reset for new session")
     return new_session
 
 

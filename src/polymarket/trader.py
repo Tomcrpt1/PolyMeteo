@@ -64,6 +64,24 @@ class Trader:
             order_ids.append(order_id)
         return order_ids
 
+    def get_open_order_ids(self) -> list[str]:
+        return list(self.state.open_orders.keys())
+
+    def close_session(self) -> None:
+        open_order_ids = self.get_open_order_ids()
+        if not open_order_ids:
+            self.log.info("session close: no open orders to handle")
+            return
+
+        self.log.info("session close: found %d open orders", len(open_order_ids))
+        if self.client.mode == "paper":
+            self.log.info("session close: clearing %d paper open orders", len(open_order_ids))
+            self.state.open_orders.clear()
+            return
+
+        self.log.error("session close: live open orders require sync/cancel before rollover")
+        self.client.sync_or_cancel_open_orders_for_rollover(open_order_ids)
+
     def cancel_all(self) -> None:
         if self.state.open_orders:
             self.log.info("Cancelling %d paper/open orders", len(self.state.open_orders))

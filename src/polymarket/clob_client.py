@@ -79,3 +79,11 @@ class PolymarketClient:
             "Live mode order placement is not implemented yet. "
             "Please run with MODE=paper until signed CLOB execution is integrated."
         )
+
+    def sync_or_cancel_open_orders_for_rollover(self, open_order_ids: list[str]) -> None:
+        if self.mode == "paper":
+            return
+        raise RuntimeError(
+            "Live rollover order sync/cancellation is not implemented yet. "
+            "Cannot safely rollover with existing live open orders."
+        )

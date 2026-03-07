@@ -91,7 +91,7 @@ def _session_for_polling(target_date: date, pm: FakePMClient | None = None) -> B
         target_date=target_date,
         market_url=f"https://example.com/{target_date.isoformat()}",
         pm_client=pm_client,
-        trader=SimpleNamespace(),
+        trader=Trader(FakeClientForTrader()),
         risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[])),
         runtime=RuntimeState(),
         polling=PollingState(),
@@ -280,6 +280,9 @@ def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
 
     log = FakeLog()
     old_session = _session_for_polling(date(2026, 3, 5))
+    old_session.trader.state.open_orders = {
+        "paper-old": LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=10)
+    }
     old_session.polling.weather = "stale"
     old_session.polling.market = "stale"
     old_session.risk.state.order_timestamps = [datetime(2026, 3, 5, 23, 40, tzinfo=TZ)]
@@ -327,6 +330,9 @@ def test_rollover_carries_order_timestamps_but_resets_daily_execution_state(monk
         runtime=RuntimeState(),
         polling=PollingState(),
     )
+    old_session.trader.state.open_orders = {
+        "paper-old": LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=5)
+    }
 
     def _fake_build(settings_obj, target_date):
         return BotSession(
@@ -351,6 +357,65 @@ def test_rollover_carries_order_timestamps_but_resets_daily_execution_state(monk
 
     assert rolled.risk.state.order_timestamps == [datetime(2026, 3, 5, 23, 50, tzinfo=TZ)]
     assert rolled.trader.execution.lock19_main_exposure_usd == 0.0
+
+
+def test_paper_rollover_explicitly_clears_previous_open_orders(monkeypatch):
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = True
+    session = _session_for_polling(date(2026, 3, 5))
+    session.trader.state.open_orders = {
+        "paper-old-1": LimitOrderRequest(token_id="t1", outcome="19", price=0.5, size_usd=10),
+        "paper-old-2": LimitOrderRequest(token_id="t2", outcome="18", price=0.4, size_usd=5),
+    }
+
+    monkeypatch.setattr("src.main.build_bot_session", lambda settings_obj, target_date: _session_for_polling(target_date))
+    new_session = maybe_rollover_session(
+        settings,
+        datetime(2026, 3, 6, 0, 1, tzinfo=TZ),
+        session,
+        SimpleNamespace(info=lambda *args, **kwargs: None),
+        FakeWUClient(),
+    )
+
+    assert session.trader.get_open_order_ids() == []
+    assert new_session.trader.get_open_order_ids() == []
+
+
+def test_live_rollover_does_not_silently_discard_open_orders(monkeypatch):
+    class FakeLiveClient:
+        mode = "live"
+
+        def place_limit_order(self, req):
+            return "live-order"
+
+        def sync_or_cancel_open_orders_for_rollover(self, open_order_ids):
+            raise RuntimeError("live rollover order sync not implemented")
+
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = True
+    old_session = BotSession(
+        target_date=date(2026, 3, 5),
+        market_url="https://example.com/old",
+        pm_client=FakePMClient(),
+        trader=Trader(FakeLiveClient()),
+        risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[])),
+        runtime=RuntimeState(),
+        polling=PollingState(),
+    )
+    old_session.trader.state.open_orders = {
+        "live-old": LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=10)
+    }
+
+    monkeypatch.setattr("src.main.build_bot_session", lambda settings_obj, target_date: _session_for_polling(target_date))
+
+    with pytest.raises(RuntimeError, match="live rollover order sync"):
+        maybe_rollover_session(
+            settings,
+            datetime(2026, 3, 6, 0, 1, tzinfo=TZ),
+            old_session,
+            SimpleNamespace(info=lambda *args, **kwargs: None),
+            FakeWUClient(),
+        )
 
 
 def test_day_rollover_disabled_keeps_same_session():
