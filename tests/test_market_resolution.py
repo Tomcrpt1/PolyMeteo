@@ -46,3 +46,9 @@ def test_market_url_empty_string_is_none(monkeypatch):
     monkeypatch.setenv("MARKET_URL", "")
     settings = Settings()
     assert settings.market_url is None
+
+
+def test_default_market_url_template_builds_expected_paris_slug():
+    settings = Settings()
+    built = build_market_url_from_target_date(date(2026, 3, 5), settings.market_url_template)
+    assert built == "https://polymarket.com/event/highest-temperature-in-paris-on-march-5-2026"

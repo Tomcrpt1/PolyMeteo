@@ -75,5 +75,7 @@ class PolymarketClient:
         if self.mode == "paper":
             self.log.info("[paper] place order outcome=%s price=%.3f size=%.2f", req.outcome, req.price, req.size_usd)
             return f"paper-{req.outcome}-{req.price:.3f}"
-        # Live path intentionally minimal and compatible with py-clob-client setup outside this repository.
-        raise NotImplementedError("Live trading wiring should use py-clob-client credentials and signing")
+        raise RuntimeError(
+            "Live mode order placement is not implemented yet. "
+            "Please run with MODE=paper until signed CLOB execution is integrated."
+        )

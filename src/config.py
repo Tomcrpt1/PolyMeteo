@@ -4,7 +4,7 @@ from pathlib import Path
 from datetime import time
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,15 +70,6 @@ class Settings(BaseSettings):
         if value == "":
             return None
         return value
-
-    @model_validator(mode="after")
-    def _validate_live_requirements(self) -> "Settings":
-        if self.mode == "live":
-            if not self.polymarket_private_key:
-                raise ValueError("POLYMARKET_PRIVATE_KEY is required in live mode")
-            if not self.market_id and not self.market_url:
-                raise ValueError("MARKET_ID or MARKET_URL is required")
-        return self
 
     @staticmethod
     def _parse_hhmm(value: str) -> time:
