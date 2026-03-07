@@ -94,6 +94,3 @@ class Settings(BaseSettings):
     @property
     def kill_switch_file(self) -> Path:
         return Path(self.kill_switch_path)
-
-
-settings = Settings()

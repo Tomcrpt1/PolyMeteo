@@ -131,6 +131,10 @@ def build_bot_session(settings: Settings, target_date: date) -> BotSession:
     )
 
 
+def carry_over_risk_state(previous_session: BotSession, new_session: BotSession) -> None:
+    new_session.risk.state.order_timestamps = list(previous_session.risk.state.order_timestamps)
+
+
 def maybe_rollover_session(
     settings: Settings,
     now_local: datetime,
@@ -142,6 +146,7 @@ def maybe_rollover_session(
     if active_target_date == session.target_date:
         return session
     new_session = build_bot_session(settings, active_target_date)
+    carry_over_risk_state(session, new_session)
     if wu_client:
         wu_client.reset_cache()
     log.info(

@@ -92,7 +92,7 @@ def _session_for_polling(target_date: date, pm: FakePMClient | None = None) -> B
         market_url=f"https://example.com/{target_date.isoformat()}",
         pm_client=pm_client,
         trader=SimpleNamespace(),
-        risk=SimpleNamespace(),
+        risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[])),
         runtime=RuntimeState(),
         polling=PollingState(),
     )
@@ -282,6 +282,7 @@ def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
     old_session = _session_for_polling(date(2026, 3, 5))
     old_session.polling.weather = "stale"
     old_session.polling.market = "stale"
+    old_session.risk.state.order_timestamps = [datetime(2026, 3, 5, 23, 40, tzinfo=TZ)]
 
     def _fake_build(settings_obj, target_date):
         trader = Trader(FakeClientForTrader())
@@ -291,7 +292,7 @@ def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
             market_url=f"https://polymarket.com/event/highest-temperature-in-paris-on-march-{target_date.day}-2026",
             pm_client=FakePMClient(),
             trader=trader,
-            risk=SimpleNamespace(),
+            risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[])),
             runtime=RuntimeState(),
             polling=PollingState(),
         )
@@ -306,9 +307,50 @@ def test_day_rollover_rebuilds_market_and_resets_daily_state(monkeypatch):
     assert new_session.market_url.endswith("march-6-2026")
     assert new_session.polling.weather is None
     assert new_session.polling.market is None
+    assert new_session.risk.state.order_timestamps == [datetime(2026, 3, 5, 23, 40, tzinfo=TZ)]
     assert new_session is not old_session
     assert wu.reset_calls == 1
     assert any("target-date rollover" in message for message in log.messages)
+
+
+def test_rollover_carries_order_timestamps_but_resets_daily_execution_state(monkeypatch):
+    settings = FakeSettings()
+    settings.auto_rollover_target_date = True
+    old_trader = Trader(FakeClientForTrader())
+    old_trader.execution.lock19_main_exposure_usd = 22.0
+    old_session = BotSession(
+        target_date=date(2026, 3, 5),
+        market_url="https://example.com/old",
+        pm_client=FakePMClient(),
+        trader=old_trader,
+        risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[datetime(2026, 3, 5, 23, 50, tzinfo=TZ)])),
+        runtime=RuntimeState(),
+        polling=PollingState(),
+    )
+
+    def _fake_build(settings_obj, target_date):
+        return BotSession(
+            target_date=target_date,
+            market_url="https://example.com/new",
+            pm_client=FakePMClient(),
+            trader=Trader(FakeClientForTrader()),
+            risk=SimpleNamespace(state=SimpleNamespace(order_timestamps=[])),
+            runtime=RuntimeState(),
+            polling=PollingState(),
+        )
+
+    monkeypatch.setattr("src.main.build_bot_session", _fake_build)
+
+    rolled = maybe_rollover_session(
+        settings,
+        datetime(2026, 3, 6, 0, 1, tzinfo=TZ),
+        old_session,
+        SimpleNamespace(info=lambda *args, **kwargs: None),
+        FakeWUClient(),
+    )
+
+    assert rolled.risk.state.order_timestamps == [datetime(2026, 3, 5, 23, 50, tzinfo=TZ)]
+    assert rolled.trader.execution.lock19_main_exposure_usd == 0.0
 
 
 def test_day_rollover_disabled_keeps_same_session():

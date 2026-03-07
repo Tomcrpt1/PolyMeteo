@@ -1,5 +1,6 @@
 from datetime import date
 
+import src.config as config_module
 from src.config import Settings
 from src.polymarket.market_resolution import (
     build_market_url_from_target_date,
@@ -52,3 +53,7 @@ def test_default_market_url_template_builds_expected_paris_slug():
     settings = Settings()
     built = build_market_url_from_target_date(date(2026, 3, 5), settings.market_url_template)
     assert built == "https://polymarket.com/event/highest-temperature-in-paris-on-march-5-2026"
+
+
+def test_config_module_has_no_global_settings_singleton():
+    assert not hasattr(config_module, "settings")
