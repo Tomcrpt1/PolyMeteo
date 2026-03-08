@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
@@ -20,25 +22,144 @@ class PolymarketClient:
         self.log = logging.getLogger("polymeteo")
         self.http = httpx.Client(timeout=15)
 
-    def _resolve_market_id_from_url(self) -> str:
-        if not self.market_url:
-            raise ValueError("market_url required to resolve market_id")
-        slug = urlparse(self.market_url).path.rstrip("/").split("/")[-1]
+    @dataclass(slots=True)
+    class ResolvedGammaMarket:
+        market_id: str
+        event_id: str | None
+        title: str | None
+        slug: str | None
+        source: str
+
+    def _parse_event_slug(self, market_url: str) -> str:
+        slug = urlparse(market_url.split("#", maxsplit=1)[0]).path.rstrip("/").split("/")[-1]
         if not slug:
-            raise ValueError(f"Unable to parse market slug from MARKET_URL={self.market_url}")
-        url = "https://gamma-api.polymarket.com/markets"
-        response = self.http.get(url, params={"slug": slug})
+            raise ValueError(f"Unable to parse market slug from MARKET_URL={market_url}")
+        return slug
+
+    def _gamma_get(self, endpoint: str, params: dict[str, str]) -> list[dict]:
+        response = self.http.get(f"https://gamma-api.polymarket.com/{endpoint}", params=params)
         data = response.json()
-        if isinstance(data, list) and data:
-            market_id = data[0].get("id")
+        if isinstance(data, list):
+            return data
+        return [data] if isinstance(data, dict) else []
+
+    def _extract_markets_from_events(self, events: list[dict]) -> list[dict]:
+        markets: list[dict] = []
+        for event in events:
+            nested = event.get("markets") or []
+            for market in nested:
+                if isinstance(market, dict):
+                    markets.append(
+                        {
+                            **market,
+                            "_event_id": event.get("id"),
+                            "_event_title": event.get("title") or event.get("name"),
+                            "_event_slug": event.get("slug"),
+                        }
+                    )
+        return markets
+
+    @staticmethod
+    def _date_fragment(text: str | None) -> str | None:
+        if not text:
+            return None
+        match = re.search(
+            r"(january|february|march|april|may|june|july|august|september|october|november|december)-\d{1,2}-\d{4}",
+            text.lower(),
+        )
+        return match.group(0) if match else None
+
+    def _candidate_score(self, candidate: dict, desired_slug: str) -> int:
+        desired_slug_l = desired_slug.lower()
+        desired_date = self._date_fragment(desired_slug_l)
+
+        slug = str(candidate.get("slug") or candidate.get("_event_slug") or "").lower()
+        title = str(candidate.get("question") or candidate.get("title") or candidate.get("_event_title") or "").lower()
+        text = f"{slug} {title}"
+
+        score = 0
+        if slug == desired_slug_l:
+            score += 100
+        if desired_slug_l in text:
+            score += 30
+        if desired_date and desired_date in text:
+            score += 25
+        if "paris" in text:
+            score += 10
+        if "highest" in text and "temperature" in text:
+            score += 10
+        return score
+
+    def _select_best_candidate(self, candidates: list[dict], desired_slug: str) -> dict | None:
+        ranked = sorted(
+            candidates,
+            key=lambda c: (self._candidate_score(c, desired_slug), str(c.get("id") or "")),
+            reverse=True,
+        )
+        if not ranked:
+            return None
+        if self._candidate_score(ranked[0], desired_slug) <= 0:
+            return None
+        return ranked[0]
+
+    def discover_market_via_gamma(self, market_url: str) -> ResolvedGammaMarket:
+        slug = self._parse_event_slug(market_url)
+        self.log.info("gamma discovery: event_url=%s slug=%s", market_url, slug)
+
+        primary = self._gamma_get("markets", {"slug": slug})
+        self.log.info("gamma discovery: primary markets?slug results=%d", len(primary))
+        selected = self._select_best_candidate(primary, slug)
+        if selected:
+            market_id = selected.get("id")
             if market_id:
-                return str(market_id)
-        raise ValueError(f"Could not resolve market_id from MARKET_URL={self.market_url}")
+                return self.ResolvedGammaMarket(
+                    market_id=str(market_id),
+                    event_id=str(selected.get("eventId")) if selected.get("eventId") else None,
+                    title=str(selected.get("question") or selected.get("title")) if (selected.get("question") or selected.get("title")) else None,
+                    slug=str(selected.get("slug")) if selected.get("slug") else None,
+                    source="markets?slug",
+                )
+
+        attempts = ["markets?slug"]
+        fallback_candidates: list[dict] = []
+        for endpoint, params in [
+            ("events", {"slug": slug}),
+            ("markets", {"search": slug}),
+            ("events", {"search": slug.replace("-", " ")}),
+        ]:
+            attempts.append(f"{endpoint}?{','.join(params.keys())}")
+            rows = self._gamma_get(endpoint, params)
+            if endpoint == "events":
+                rows = self._extract_markets_from_events(rows)
+            fallback_candidates.extend(rows)
+
+        self.log.info("gamma discovery: fallback candidates=%d", len(fallback_candidates))
+        selected = self._select_best_candidate(fallback_candidates, slug)
+        if selected and selected.get("id"):
+            resolved = self.ResolvedGammaMarket(
+                market_id=str(selected.get("id")),
+                event_id=str(selected.get("eventId") or selected.get("_event_id")) if (selected.get("eventId") or selected.get("_event_id")) else None,
+                title=str(selected.get("question") or selected.get("title") or selected.get("_event_title"))
+                if (selected.get("question") or selected.get("title") or selected.get("_event_title"))
+                else None,
+                slug=str(selected.get("slug") or selected.get("_event_slug")) if (selected.get("slug") or selected.get("_event_slug")) else None,
+                source="fallback",
+            )
+            self.log.info("gamma discovery: selected market_id=%s title=%s source=%s", resolved.market_id, resolved.title, resolved.source)
+            return resolved
+
+        raise ValueError(
+            f"Could not resolve market via gamma for slug={slug}. "
+            f"primary markets?slug returned {len(primary)} results; attempts={attempts}."
+        )
 
     @network_retry
     def fetch_market_tokens(self) -> dict[str, str]:
         if not self.market_id:
-            self.market_id = self._resolve_market_id_from_url()
+            if not self.market_url:
+                raise ValueError("market_url required to resolve market_id")
+            resolved = self.discover_market_via_gamma(self.market_url)
+            self.market_id = resolved.market_id
         url = f"https://gamma-api.polymarket.com/markets/{self.market_id}"
         data = self.http.get(url).json()
         outcomes = data.get("outcomes") or []
