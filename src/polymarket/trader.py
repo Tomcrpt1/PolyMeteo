@@ -55,12 +55,14 @@ class Trader:
         order_ids: list[str] = []
         for order in desired_orders:
             order_id = self.client.place_limit_order(order)
-            self.state.open_orders[order_id] = order
             if self.client.mode == "paper":
+                # Paper mode assumes immediate fills, so orders must not remain open.
                 if strategy_mode == "legacy":
                     self.execution.register_legacy_fill(order)
                 else:
                     self.execution.register_lock19_fill(order, lock19_main_bucket)
+            else:
+                self.state.open_orders[order_id] = order
             order_ids.append(order_id)
         return order_ids
 

@@ -163,6 +163,13 @@ class FakeClientForTrader:
         return "paper-order"
 
 
+class FakeNonPaperClientForTrader:
+    mode = "live-sim"
+
+    def place_limit_order(self, req):
+        return "live-order"
+
+
 def _lock19_inputs(main_target_usd: float) -> Lock19Inputs:
     records = [
         HourlyWeatherRecord(timestamp=datetime(2026, 3, 5, 17, 0, tzinfo=TZ), temperature_c=18.0, wind_kph=10, cloud_cover_pct=20),
@@ -215,6 +222,25 @@ def test_repeated_cycles_do_not_overbuy_when_target_already_filled():
 
     plan = decide_lock19(runtime.lock19, _lock19_inputs(main_target_usd=25))
     assert not plan.should_place_main
+
+
+def test_paper_immediate_fill_does_not_leave_open_order():
+    trader = Trader(FakeClientForTrader())
+    order = LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=10)
+
+    trader.requote([order], lock19_main_bucket="19")
+
+    assert trader.execution.lock19_main_exposure_usd == 10
+    assert trader.get_open_order_ids() == []
+
+
+def test_non_paper_requote_tracks_open_orders():
+    trader = Trader(FakeNonPaperClientForTrader())
+    order = LimitOrderRequest(token_id="t", outcome="19", price=0.5, size_usd=10)
+
+    trader.requote([order], lock19_main_bucket="19")
+
+    assert len(trader.get_open_order_ids()) == 1
 
 
 def test_risk_reads_exposure_from_paper_execution_state():
